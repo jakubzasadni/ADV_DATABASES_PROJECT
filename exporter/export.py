@@ -32,7 +32,6 @@ def export_earthquakes(conn, limit: int = 5000):
                    latitude, longitude, depth, status,
                    alert, tsunami, significance
             FROM earthquakes
-            WHERE time >= NOW() - INTERVAL '365 days'
             ORDER BY time DESC
             LIMIT %s
         """, (limit,))
@@ -48,43 +47,40 @@ def export_earthquakes(conn, limit: int = 5000):
 def export_stats(conn):
     stats = {}
     with conn.cursor() as cur:
-        # dzienne liczby zdarzeń z ostatnich 90 dni
+        # dzienne liczby zdarzeń (ostatnie 90 dni danych w bazie)
         cur.execute("""
             SELECT DATE(time) AS day, COUNT(*) AS count
             FROM earthquakes
-            WHERE time >= NOW() - INTERVAL '90 days'
+            WHERE time >= (SELECT MAX(time) FROM earthquakes) - INTERVAL '90 days'
             GROUP BY day ORDER BY day
         """)
         stats["daily_counts"] = [{"day": str(r["day"]), "count": r["count"]} for r in cur.fetchall()]
 
-        # rozkład magnitudy
+        # rozkład magnitudy (wszystkie dane)
         cur.execute("""
             SELECT FLOOR(magnitude) AS bucket, COUNT(*) AS count
             FROM earthquakes
             WHERE magnitude IS NOT NULL
-              AND time >= NOW() - INTERVAL '365 days'
             GROUP BY bucket ORDER BY bucket
         """)
         stats["magnitude_distribution"] = [{"bucket": float(r["bucket"]), "count": r["count"]} for r in cur.fetchall()]
 
-        # top 10 najsilniejszych
+        # top 10 najsilniejszych (wszystkie dane)
         cur.execute("""
             SELECT id, time, magnitude, place, latitude, longitude
             FROM earthquakes
-            WHERE time >= NOW() - INTERVAL '365 days'
             ORDER BY magnitude DESC NULLS LAST
             LIMIT 10
         """)
         stats["top10"] = [dict(r) | {"time": r["time"].isoformat()} for r in cur.fetchall()]
 
-        # podsumowanie
+        # podsumowanie (wszystkie dane)
         cur.execute("""
             SELECT COUNT(*) AS total,
                    AVG(magnitude) AS avg_mag,
                    MAX(magnitude) AS max_mag,
                    SUM(tsunami::int) AS tsunami_count
             FROM earthquakes
-            WHERE time >= NOW() - INTERVAL '365 days'
         """)
         row = dict(cur.fetchone())
         stats["summary"] = {k: float(v) if v is not None else None for k, v in row.items()}
