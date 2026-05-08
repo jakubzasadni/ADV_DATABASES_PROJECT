@@ -9,28 +9,46 @@ System do pobierania, przechowywania i wizualizacji danych sejsmicznych z całeg
 
 ## Stack technologiczny
 
-- **Baza danych**: PostgreSQL + PostGIS (dane przestrzenne)
-- **Kolektor danych**: Python (APScheduler, httpx/requests, SQLAlchemy)
+- **Baza danych**: PostgreSQL (docker-compose, lokalnie)
+- **Kolektor danych**: Python (httpx/requests, psycopg2/SQLAlchemy)
 - **Źródło danych**: USGS Earthquake Catalog API (GeoJSON)
-- **Dashboard**: Python Dash (plotly) lub Streamlit
-- **Środowisko**: Docker Compose (PostgreSQL + kolektor + dashboard)
+- **Dashboard**: Statyczny HTML/CSS/JS (GitHub Pages) - Plotly.js + Leaflet.js
+- **Eksport danych**: Python skrypt generujący JSON z PostgreSQL → `docs/data/`
+- **CI/CD**: GitHub Actions - automatyczny eksport + deploy na GitHub Pages
+
+## Architektura
+
+```
+PostgreSQL (docker) ←── Python collector (USGS API)
+        ↓
+Python export script → docs/data/*.json
+        ↓
+GitHub Pages (docs/) → statyczny dashboard HTML/JS
+```
+
+GitHub Pages serwuje folder `docs/`. Dashboard fetchuje lokalne pliki JSON (pre-generated).
 
 ## Struktura projektu
 
 ```
 /
 ├── db/
-│   ├── init.sql          # Schema PostgreSQL
-│   └── migrations/       # Ewentualne migracje Alembic
+│   └── init.sql              # Schema PostgreSQL
 ├── collector/
-│   ├── main.py           # Entry point kolektora (scheduler)
-│   ├── usgs_api.py       # Klient USGS API
-│   ├── models.py         # SQLAlchemy modele
+│   ├── main.py               # Entry point (pobiera dane z USGS → PostgreSQL)
+│   ├── usgs_api.py           # Klient USGS API
+│   ├── db.py                 # Połączenie z PostgreSQL, UPSERT
 │   └── requirements.txt
-├── dashboard/
-│   ├── app.py            # Główna aplikacja Dash/Streamlit
-│   ├── components/       # Komponenty UI
+├── exporter/
+│   ├── export.py             # Eksportuje dane z PostgreSQL → docs/data/*.json
 │   └── requirements.txt
+├── docs/                     # GitHub Pages root
+│   ├── index.html            # Dashboard
+│   ├── css/style.css
+│   ├── js/app.js             # Logika: filtry, wykresy Plotly.js, mapa Leaflet
+│   └── data/                 # Generowane JSON-y (gitignored lub commitowane)
+│       ├── earthquakes.json
+│       └── stats.json
 ├── docker-compose.yml
 └── .gitignore
 ```
@@ -78,9 +96,11 @@ Tabela `earthquakes`:
 
 ## Zasady dla AI
 
-1. PostgreSQL: używaj UPSERT (`ON CONFLICT DO UPDATE`) przy wstawianiu danych, bo USGS aktualizuje zdarzenia
-2. Kolektor: pobieraj dane partiami (np. po 30 dni) żeby nie przekroczyć limitów USGS API (max 20000 rekordów na zapytanie)
-3. Dashboard: filtry reagują real-time (Dash callbacks), mapa jako Plotly scatter_mapbox
-4. Docker: wszystkie serwisy przez docker-compose, baza na wolumenie named
-5. Nie używaj ORM do bulk insertów - preferuj `executemany` / `copy_from` dla wydajności
-6. Zmienne środowiskowe przez `.env` file (DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
+1. PostgreSQL: używaj UPSERT (`ON CONFLICT (id) DO UPDATE`) - USGS aktualizuje zdarzenia
+2. Kolektor: pobieraj dane partiami po 30 dni, max 20000 rekordów na zapytanie USGS API
+3. Nie używaj ORM do bulk insertów - `executemany` z psycopg2 dla wydajności
+4. Zmienne środowiskowe przez `.env` (DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
+5. Docker: baza na named volume, kolektor i exporter jako osobne serwisy
+6. Dashboard (GitHub Pages): czysty JS bez frameworków, Plotly.js CDN + Leaflet.js CDN
+7. Filtry w dashboardzie działają client-side na załadowanych JSON-ach (nie fetchują za każdym razem)
+8. JSON eksport: `earthquakes.json` = lista ostatnich N zdarzeń, `stats.json` = agregaty do wykresów
