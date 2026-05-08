@@ -30,4 +30,4 @@ Thumbs.db
 # Data
 *.csv
 *.json
-!sample_data/*.json
+!docs/data/*.json
