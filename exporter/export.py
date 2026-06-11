@@ -4,91 +4,109 @@ Uruchom: python export.py
 """
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-import psycopg2
-import psycopg2.extras
 from dotenv import load_dotenv
+from sqlalchemy import Integer, cast, create_engine, func, select
+from sqlalchemy.orm import Session
+
+from models import Earthquake
 
 load_dotenv()
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "../docs/data")
 
 
-def get_conn():
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=os.getenv("DB_PORT", 5432),
-        dbname=os.getenv("DB_NAME", "earthquakes"),
-        user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", "postgres"),
-        cursor_factory=psycopg2.extras.RealDictCursor,
+def _build_url() -> str:
+    return (
+        f"postgresql+psycopg2://{os.getenv('DB_USER', 'postgres')}:"
+        f"{os.getenv('DB_PASSWORD', 'postgres')}@"
+        f"{os.getenv('DB_HOST', 'localhost')}:"
+        f"{os.getenv('DB_PORT', 5432)}/"
+        f"{os.getenv('DB_NAME', 'earthquakes')}"
     )
 
 
-def export_earthquakes(conn, limit: int = 5000):
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT id, time, magnitude, mag_type, place,
-                   latitude, longitude, depth, status,
-                   alert, tsunami, significance
-            FROM earthquakes
-            ORDER BY time DESC
-            LIMIT %s
-        """, (limit,))
-        rows = cur.fetchall()
-    data = []
-    for r in rows:
-        row = dict(r)
-        row["time"] = row["time"].isoformat()
-        data.append(row)
-    return data
+def export_earthquakes(session: Session, limit: int = 5000) -> list[dict]:
+    stmt = select(Earthquake).order_by(Earthquake.time.desc()).limit(limit)
+    rows = session.scalars(stmt).all()
+    return [
+        {
+            "id": r.id,
+            "time": r.time.isoformat(),
+            "magnitude": r.magnitude,
+            "mag_type": r.mag_type,
+            "place": r.place,
+            "latitude": r.latitude,
+            "longitude": r.longitude,
+            "depth": r.depth,
+            "status": r.status,
+            "alert": r.alert,
+            "tsunami": r.tsunami,
+            "significance": r.significance,
+        }
+        for r in rows
+    ]
 
 
-def export_stats(conn):
-    stats = {}
-    with conn.cursor() as cur:
-        # dzienne liczby zdarzeń (ostatnie 90 dni danych w bazie)
-        cur.execute("""
-            SELECT DATE(time) AS day, COUNT(*) AS count
-            FROM earthquakes
-            WHERE time >= (SELECT MAX(time) FROM earthquakes) - INTERVAL '90 days'
-            GROUP BY day ORDER BY day
-        """)
-        stats["daily_counts"] = [{"day": str(r["day"]), "count": r["count"]} for r in cur.fetchall()]
+def export_stats(session: Session) -> dict:
+    max_time = session.scalar(select(func.max(Earthquake.time)))
+    cutoff = max_time - timedelta(days=90)
 
-        # rozkład magnitudy (wszystkie dane)
-        cur.execute("""
-            SELECT FLOOR(magnitude) AS bucket, COUNT(*) AS count
-            FROM earthquakes
-            WHERE magnitude IS NOT NULL
-            GROUP BY bucket ORDER BY bucket
-        """)
-        stats["magnitude_distribution"] = [{"bucket": float(r["bucket"]), "count": r["count"]} for r in cur.fetchall()]
+    # dzienne liczby zdarzeń (ostatnie 90 dni danych w bazie)
+    daily_stmt = (
+        select(func.date(Earthquake.time).label("day"), func.count().label("count"))
+        .where(Earthquake.time >= cutoff)
+        .group_by(func.date(Earthquake.time))
+        .order_by(func.date(Earthquake.time))
+    )
+    daily = session.execute(daily_stmt).all()
 
-        # top 10 najsilniejszych (wszystkie dane)
-        cur.execute("""
-            SELECT id, time, magnitude, place, latitude, longitude
-            FROM earthquakes
-            ORDER BY magnitude DESC NULLS LAST
-            LIMIT 10
-        """)
-        stats["top10"] = [dict(r) | {"time": r["time"].isoformat()} for r in cur.fetchall()]
+    # rozkład magnitudy (wszystkie dane)
+    mag_stmt = (
+        select(func.floor(Earthquake.magnitude).label("bucket"), func.count().label("count"))
+        .where(Earthquake.magnitude.is_not(None))
+        .group_by(func.floor(Earthquake.magnitude))
+        .order_by(func.floor(Earthquake.magnitude))
+    )
+    mag_dist = session.execute(mag_stmt).all()
 
-        # podsumowanie (wszystkie dane)
-        cur.execute("""
-            SELECT COUNT(*) AS total,
-                   AVG(magnitude) AS avg_mag,
-                   MAX(magnitude) AS max_mag,
-                   SUM(tsunami::int) AS tsunami_count
-            FROM earthquakes
-        """)
-        row = dict(cur.fetchone())
-        stats["summary"] = {k: float(v) if v is not None else None for k, v in row.items()}
+    # top 10 najsilniejszych (wszystkie dane)
+    top10_stmt = (
+        select(Earthquake)
+        .where(Earthquake.magnitude.is_not(None))
+        .order_by(Earthquake.magnitude.desc())
+        .limit(10)
+    )
+    top10 = session.scalars(top10_stmt).all()
 
-    return stats
+    # podsumowanie (wszystkie dane)
+    summary_stmt = select(
+        func.count().label("total"),
+        func.avg(Earthquake.magnitude).label("avg_mag"),
+        func.max(Earthquake.magnitude).label("max_mag"),
+        func.sum(cast(Earthquake.tsunami, Integer)).label("tsunami_count"),
+    )
+    row = session.execute(summary_stmt).one()
+
+    return {
+        "daily_counts": [{"day": str(r.day), "count": r.count} for r in daily],
+        "magnitude_distribution": [{"bucket": float(r.bucket), "count": r.count} for r in mag_dist],
+        "top10": [
+            {
+                "id": r.id,
+                "time": r.time.isoformat(),
+                "magnitude": r.magnitude,
+                "place": r.place,
+                "latitude": r.latitude,
+                "longitude": r.longitude,
+            }
+            for r in top10
+        ],
+        "summary": {k: float(v) if v is not None else None for k, v in row._mapping.items()},
+    }
 
 
-def write_json(path: str, data):
+def write_json(path: str, data) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, default=str)
@@ -96,9 +114,9 @@ def write_json(path: str, data):
 
 
 if __name__ == "__main__":
-    conn = get_conn()
-    write_json(f"{OUTPUT_DIR}/earthquakes.json", export_earthquakes(conn))
-    write_json(f"{OUTPUT_DIR}/stats.json", export_stats(conn))
+    engine = create_engine(_build_url())
+    with Session(engine) as session:
+        write_json(f"{OUTPUT_DIR}/earthquakes.json", export_earthquakes(session))
+        write_json(f"{OUTPUT_DIR}/stats.json", export_stats(session))
     write_json(f"{OUTPUT_DIR}/meta.json", {"exported_at": datetime.now(tz=timezone.utc).isoformat()})
-    conn.close()
     print("Export complete.")

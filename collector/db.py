@@ -1,44 +1,69 @@
 import os
-import psycopg2
-from psycopg2.extras import execute_values
+
 from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
+
+from models import Base, Earthquake
 
 load_dotenv()
 
-UPSERT_SQL = """
-INSERT INTO earthquakes (id, time, magnitude, mag_type, place, latitude, longitude, depth, status, alert, tsunami, significance, updated_at)
-VALUES %s
-ON CONFLICT (id) DO UPDATE SET
-    magnitude   = EXCLUDED.magnitude,
-    mag_type    = EXCLUDED.mag_type,
-    place       = EXCLUDED.place,
-    status      = EXCLUDED.status,
-    alert       = EXCLUDED.alert,
-    tsunami     = EXCLUDED.tsunami,
-    significance= EXCLUDED.significance,
-    updated_at  = EXCLUDED.updated_at
-"""
 
-def get_conn():
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=os.getenv("DB_PORT", 5432),
-        dbname=os.getenv("DB_NAME", "earthquakes"),
-        user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", "postgres"),
+def _build_url() -> str:
+    return (
+        f"postgresql+psycopg2://{os.getenv('DB_USER', 'postgres')}:"
+        f"{os.getenv('DB_PASSWORD', 'postgres')}@"
+        f"{os.getenv('DB_HOST', 'localhost')}:"
+        f"{os.getenv('DB_PORT', 5432)}/"
+        f"{os.getenv('DB_NAME', 'earthquakes')}"
     )
+
+
+engine = create_engine(_build_url())
+Base.metadata.create_all(engine)
+
 
 def upsert_events(events: list[dict]) -> int:
     if not events:
         return 0
+
     rows = [
-        (
-            e["id"], e["time"], e["magnitude"], e["mag_type"], e["place"],
-            e["latitude"], e["longitude"], e["depth"], e["status"],
-            e["alert"], e["tsunami"], e["significance"], e["updated_at"],
-        )
+        {
+            "id": e["id"],
+            "time": e["time"],
+            "magnitude": e["magnitude"],
+            "mag_type": e["mag_type"],
+            "place": e["place"],
+            "latitude": e["latitude"],
+            "longitude": e["longitude"],
+            "depth": e["depth"],
+            "status": e["status"],
+            "alert": e["alert"],
+            "tsunami": e["tsunami"],
+            "significance": e["significance"],
+            "updated_at": e["updated_at"],
+        }
         for e in events
     ]
-    with get_conn() as conn, conn.cursor() as cur:
-        execute_values(cur, UPSERT_SQL, rows)
+
+    stmt = pg_insert(Earthquake).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["id"],
+        set_={
+            "magnitude": stmt.excluded.magnitude,
+            "mag_type": stmt.excluded.mag_type,
+            "place": stmt.excluded.place,
+            "status": stmt.excluded.status,
+            "alert": stmt.excluded.alert,
+            "tsunami": stmt.excluded.tsunami,
+            "significance": stmt.excluded.significance,
+            "updated_at": stmt.excluded.updated_at,
+        },
+    )
+
+    with Session(engine) as session:
+        session.execute(stmt)
+        session.commit()
+
     return len(rows)
