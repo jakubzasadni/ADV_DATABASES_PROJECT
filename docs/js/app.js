@@ -45,16 +45,26 @@ function magColor(mag) {
   return "#22c55e";
 }
 
+function alertColor(alert) {
+  if (alert === "red")    return "#ef4444";
+  if (alert === "orange") return "#f97316";
+  if (alert === "yellow") return "#eab308";
+  if (alert === "green")  return "#22c55e";
+  return "#94a3b8";
+}
+
 function renderMap(events) {
   markersLayer.clearLayers();
+  const hasAlertFilter = document.getElementById("f-alert").value !== "";
   const subset = events.slice(0, 2000);
   subset.forEach(e => {
     if (e.latitude == null || e.longitude == null) return;
     const r = Math.max(3, Math.min(18, (e.magnitude ?? 1) * 2.5));
+    const color = hasAlertFilter ? alertColor(e.alert) : magColor(e.magnitude);
     L.circleMarker([e.latitude, e.longitude], {
       radius: r,
-      color: magColor(e.magnitude),
-      fillColor: magColor(e.magnitude),
+      color: color,
+      fillColor: color,
       fillOpacity: 0.6,
       weight: 1,
     })
